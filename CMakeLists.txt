@@ -4,7 +4,7 @@ project(iscons)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(SOURCE_FILES main.cpp)
+set(SOURCE_FILES src/main.cpp)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(READLINE REQUIRED readline) # add GNU readline
