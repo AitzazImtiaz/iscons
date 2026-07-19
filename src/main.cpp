@@ -60,11 +60,25 @@ int main() {
     configstr configuration = load_config(std::string(APP_ROOT) + "/src/config/iscons.conf");
     banner(configuration);
 
-    char* line = readline(configuration.prompt.c_str());
-    if (line) {
+    while (true) {
+        char* line = readline(configuration.prompt.c_str());
+
+        if (!line) {
+            std::cout << "\n";
+            break;
+        }
+
+        std::string input = trimmer(line);
         add_history(line);
-        std::cout << ">> " << line << "\n";
+
+        if (input == "quit" || input == "exit") {
+            free(line);
+            break;
+        }
+
+        std::cout << ">> " << input << "\n";
         free(line);
     }
+
     return 0;
 }
