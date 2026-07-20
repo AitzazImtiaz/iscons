@@ -4,6 +4,12 @@
 #include <string>
 #include <map>
 #include <functional>
+#include <vector>
+
+inline std::vector<std::string>& current_args() {
+    static std::vector<std::string> args;
+    return args;
+}
 
 using CommandHandler = std::function<bool()>;
 
