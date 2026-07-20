@@ -5,3 +5,4 @@ version - Show build info
 fetch - Clone or update the local oeisdata repository
 update - Pull the latest iscons source and oeisdata, then rebuild
 pull - Download the NIST physical constants table into oeis/cons/allascii.txt
+run - Cross-check NIST constants against OEIS cons sequences
