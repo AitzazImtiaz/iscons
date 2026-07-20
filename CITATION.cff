@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Imtiaz"
+  given-names: "Aitzaz"
+  orcid: "https://orcid.org/0000-0002-1064-2897"
+title: "iscons"
+version: 0.0.1
+doi: 10.5281/ZENODO.21450596
+date-released: 2026-07-19
+url: "https://github.com/AitzazImtiaz/iscons"
