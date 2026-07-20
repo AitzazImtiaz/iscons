@@ -1,0 +1,3 @@
+help - List all available commands
+quit - Exit the program
+exit - Exit the program
