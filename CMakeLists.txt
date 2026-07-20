@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(iscons)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 file(GLOB EXT_SOURCES ${CMAKE_SOURCE_DIR}/src/ext/*.cpp)
-set(SOURCE_FILES src/main.cpp ${EXT_SOURCES})
+set(SOURCE_FILES src/main.cpp src/oeis_paths.cpp ${EXT_SOURCES})
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(READLINE REQUIRED readline)
