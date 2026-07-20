@@ -114,17 +114,25 @@ int main() {
 
         if (input.empty()) continue;
 
+        std::istringstream iss(input);
+        std::string cmd_name;
+        iss >> cmd_name;
+        std::vector<std::string> args;
+        std::string a;
+        while (iss >> a) args.push_back(a);
+
         bool unknown = true;
         for (const auto& cmd : commands) {
-            if (cmd.first == input) { unknown = false; break; }
+            if (cmd.first == cmd_name) { unknown = false; break; }
         }
 
         if (unknown) {
-            std::cerr << "\033[31mError: I cannot find command \"" << input << "\". Type help for a list!\033[0m\n";
+            std::cerr << "\033[31mError: I cannot find command \"" << cmd_name << "\". Type help for a list!\033[0m\n";
             continue;
         }
 
-        auto it = registry().find(input);
+        current_args() = args;
+        auto it = registry().find(cmd_name);
         if (it != registry().end()) {
             running = it->second();
         } else {
