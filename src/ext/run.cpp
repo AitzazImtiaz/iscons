@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -6,6 +7,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <vector>
 #include "command_registry.h"
 
@@ -14,6 +16,8 @@ namespace fs = std::filesystem;
 namespace {
 
 const size_t MIN_MATCH = 6;
+const size_t MIN_NIST_ROWS = 300;
+const char* INDEX_FORMAT = "FORMAT 2";
 
 struct Constant {
     std::string name, unit;
@@ -27,6 +31,8 @@ struct Constant {
 struct ConsSeq {
     std::string anum, name, digits;
     long offset = 0;
+    bool has_kw = false;
+    bool malformed = false;
 };
 
 std::string home_dir() {
@@ -38,6 +44,13 @@ std::string home_dir() {
 std::string rtrim(const std::string& s) {
     size_t end = s.find_last_not_of(" \t\r\n");
     return (end == std::string::npos) ? "" : s.substr(0, end + 1);
+}
+
+std::string lower(const std::string& s) {
+    std::string r = s;
+    std::transform(r.begin(), r.end(), r.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return r;
 }
 
 std::string strip_leading_zeros(const std::string& s) {
@@ -65,7 +78,7 @@ std::vector<std::string> split_columns(const std::string& line) {
                 ++i;
             }
         }
-        cols.push_back(line.substr(start, last_char - start + 1));
+        cols.push_back(rtrim(line.substr(start, last_char - start + 1)));
     }
     return cols;
 }
@@ -88,8 +101,8 @@ bool parse_number(std::string text, std::string& digits, long& ls_exp) {
         frac = (long)(t.size() - dpos - 1);
         t.erase(dpos, 1);
     }
-    for (char c : t) if (c < '0' || c > '9') return false;
     if (t.empty()) return false;
+    for (char c : t) if (c < '0' || c > '9') return false;
     digits = strip_leading_zeros(t);
     ls_exp = e - frac;
     return true;
@@ -143,21 +156,21 @@ void compute_certain(Constant& c, const std::string& unc_digits, long unc_ls, bo
     c.certain = hi.substr(0, std::min(k, c.digits.size()));
 }
 
-std::vector<Constant> parse_nist(const std::string& path, bool& ok) {
+std::vector<Constant> parse_nist(const std::string& path, bool& ok, std::string& problem) {
     std::vector<Constant> out;
     std::ifstream file(path);
     ok = false;
-    if (!file) return out;
+    if (!file) { problem = "cannot open NIST table"; return out; }
     std::string line;
     bool in_data = false;
     while (std::getline(file, line)) {
+        std::string t = rtrim(line);
         if (!in_data) {
-            std::string t = rtrim(line);
             if (t.size() > 20 && t.find_first_not_of('-') == std::string::npos) in_data = true;
             continue;
         }
-        if (rtrim(line).empty()) continue;
-        auto cols = split_columns(line);
+        if (t.empty()) continue;
+        auto cols = split_columns(t);
         if (cols.size() < 3) continue;
         Constant c;
         c.name = cols[0];
@@ -170,7 +183,26 @@ std::vector<Constant> parse_nist(const std::string& path, bool& ok) {
         compute_certain(c, ud, uls, exact);
         out.push_back(c);
     }
-    ok = in_data;
+    if (!in_data) { problem = "table header not found; format may have changed"; return out; }
+    if (out.size() < MIN_NIST_ROWS) {
+        problem = "parsed only " + std::to_string(out.size()) +
+                  " constants (expected " + std::to_string(MIN_NIST_ROWS) +
+                  "+); table format may have changed";
+        return out;
+    }
+    bool light_ok = false;
+    for (const auto& c : out) {
+        if (c.name == "speed of light in vacuum") {
+            light_ok = c.exact && c.digits == "299792458";
+            break;
+        }
+    }
+    if (!light_ok) {
+        problem = "sanity probe failed (speed of light not parsed as exactly 299792458); "
+                  "table format may have changed and the parser needs updating";
+        return out;
+    }
+    ok = true;
     return out;
 }
 
@@ -202,10 +234,14 @@ bool build_index(const std::string& seq_dir, const std::string& index_path,
                  const std::string& time_key) {
     std::ofstream out(index_path);
     if (!out) return false;
+    out << INDEX_FORMAT << "\n";
     out << "TIME\t" << time_key << "\n";
-    size_t scanned = 0, kept = 0;
-    for (auto& entry : fs::recursive_directory_iterator(seq_dir)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".seq") continue;
+    size_t scanned = 0, kept = 0, flagged = 0;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(seq_dir, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return false;
+    for (auto& entry : it) {
+        if (!entry.is_regular_file(ec) || entry.path().extension() != ".seq") continue;
         ++scanned;
         if (scanned % 50000 == 0) std::cout << "  scanned " << scanned << " files...\n";
         std::ifstream f(entry.path());
@@ -223,7 +259,10 @@ bool build_index(const std::string& seq_dir, const std::string& index_path,
                 try { offset = std::stol(payload_of(line)); has_offset = true; } catch (...) {}
             }
         }
-        if (kw.empty() || data.empty() || !has_cons_keyword(kw)) continue;
+        bool kw_cons = !kw.empty() && has_cons_keyword(kw);
+        bool name_dec = lower(name).find("decimal expansion") != std::string::npos;
+        if (!kw_cons && !name_dec) continue;
+        if (data.empty() || !has_offset) continue;
         std::string digits;
         bool regular = true;
         std::stringstream ds(data);
@@ -236,33 +275,45 @@ bool build_index(const std::string& seq_dir, const std::string& index_path,
             if (term.size() != 1 || term[0] < '0' || term[0] > '9') { regular = false; break; }
             digits += term;
         }
-        if (!regular || digits.size() < MIN_MATCH) continue;
-        if (!has_offset) continue;
-        out << entry.path().stem().string() << "\t" << offset << "\t" << digits << "\t" << name << "\n";
+        int flags = 0;
+        if (kw_cons) flags |= 1;
+        if (!regular) { flags |= 2; digits.clear(); ++flagged; }
+        if (regular && digits.size() < MIN_MATCH) continue;
+        out << entry.path().stem().string() << "\t" << flags << "\t" << offset
+            << "\t" << digits << "\t" << name << "\n";
         ++kept;
     }
-    std::cout << "Indexed " << kept << " cons sequences out of " << scanned << " files.\n";
+    std::cout << "Indexed " << kept << " decimal-expansion sequences out of " << scanned
+              << " files (" << flagged << " with malformed data).\n";
     return true;
 }
 
-std::vector<ConsSeq> load_index(const std::string& index_path, const std::string& time_key, bool& valid) {
+std::vector<ConsSeq> load_index(const std::string& index_path, const std::string& time_key,
+                                bool& valid) {
     std::vector<ConsSeq> out;
     valid = false;
     std::ifstream file(index_path);
     if (!file) return out;
     std::string line;
-    if (!std::getline(file, line)) return out;
-    if (line != "TIME\t" + time_key) return out;
+    if (!std::getline(file, line) || rtrim(line) != INDEX_FORMAT) return out;
+    if (!std::getline(file, line) || rtrim(line) != "TIME\t" + time_key) return out;
     while (std::getline(file, line)) {
         size_t t1 = line.find('\t');
-        size_t t2 = line.find('\t', t1 + 1);
-        size_t t3 = line.find('\t', t2 + 1);
-        if (t1 == std::string::npos || t2 == std::string::npos || t3 == std::string::npos) continue;
+        size_t t2 = (t1 == std::string::npos) ? std::string::npos : line.find('\t', t1 + 1);
+        size_t t3 = (t2 == std::string::npos) ? std::string::npos : line.find('\t', t2 + 1);
+        size_t t4 = (t3 == std::string::npos) ? std::string::npos : line.find('\t', t3 + 1);
+        if (t4 == std::string::npos) continue;
         ConsSeq s;
         s.anum = line.substr(0, t1);
-        try { s.offset = std::stol(line.substr(t1 + 1, t2 - t1 - 1)); } catch (...) { continue; }
-        s.digits = line.substr(t2 + 1, t3 - t2 - 1);
-        s.name = line.substr(t3 + 1);
+        int flags = 0;
+        try {
+            flags = std::stoi(line.substr(t1 + 1, t2 - t1 - 1));
+            s.offset = std::stol(line.substr(t2 + 1, t3 - t2 - 1));
+        } catch (...) { continue; }
+        s.has_kw = (flags & 1) != 0;
+        s.malformed = (flags & 2) != 0;
+        s.digits = line.substr(t3 + 1, t4 - t3 - 1);
+        s.name = rtrim(line.substr(t4 + 1));
         out.push_back(s);
     }
     valid = true;
@@ -293,6 +344,7 @@ std::string build_report(const std::vector<Constant>& constants,
         const ConsSeq* best = nullptr;
         size_t best_lcp = 0;
         for (const auto& s : seqs) {
+            if (s.malformed) continue;
             size_t l = lcp_len(c.certain, s.digits);
             if (l > best_lcp) { best_lcp = l; best = &s; }
         }
@@ -325,7 +377,22 @@ std::string build_report(const std::vector<Constant>& constants,
             ++fix_count;
             flagged = true;
         }
+        if (!best->has_kw) {
+            fixes << best->anum << "  " << c.name
+                  << " | matches this constant but lacks the 'cons' keyword\n";
+            ++fix_count;
+            flagged = true;
+        }
         if (!flagged) ++ok_count;
+    }
+
+    size_t malformed_count = 0;
+    for (const auto& s : seqs) {
+        if (!s.malformed) continue;
+        fixes << s.anum << "  " << s.name
+              << " | data terms are not single decimal digits (malformed)\n";
+        ++fix_count;
+        ++malformed_count;
     }
 
     std::ostringstream r;
@@ -337,9 +404,10 @@ std::string build_report(const std::vector<Constant>& constants,
     r << "\nOEIS MISSING CONSTANTS:\n\n";
     r << (miss_count ? missing.str() : "(none)\n");
     r << "\nSUMMARY: " << ok_count << " consistent, " << upd_count << " need update, "
-      << fix_count << " need fix, " << miss_count << " missing, "
+      << fix_count << " need fix (" << malformed_count << " malformed), "
+      << miss_count << " missing, "
       << skip_count << " skipped (fewer than " << MIN_MATCH << " certain digits), "
-      << seqs.size() << " cons sequences indexed.\n";
+      << seqs.size() << " sequences indexed.\n";
     return r.str();
 }
 
@@ -371,9 +439,9 @@ CommandRegistrar reg_run("run", []() {
     std::string time_key = read_first_line(time_path);
 
     if (sub == "index") {
-        std::cout << "Rebuilding cons index...\n";
+        std::cout << "Rebuilding index...\n";
         if (!build_index(seq_dir, index_path, time_key)) {
-            std::cerr << "\033[31mError: could not write index file.\033[0m\n";
+            std::cerr << "\033[31mError: could not build index.\033[0m\n";
         }
         return true;
     }
@@ -381,9 +449,9 @@ CommandRegistrar reg_run("run", []() {
     bool index_valid = false;
     std::vector<ConsSeq> seqs = load_index(index_path, time_key, index_valid);
     if (!index_valid) {
-        std::cout << "Index missing or stale. Building (one-time scan)...\n";
+        std::cout << "Index missing, stale, or from an older format. Rebuilding...\n";
         if (!build_index(seq_dir, index_path, time_key)) {
-            std::cerr << "\033[31mError: could not write index file.\033[0m\n";
+            std::cerr << "\033[31mError: could not build index.\033[0m\n";
             return true;
         }
         seqs = load_index(index_path, time_key, index_valid);
@@ -394,9 +462,10 @@ CommandRegistrar reg_run("run", []() {
     }
 
     bool nist_ok = false;
-    std::vector<Constant> constants = parse_nist(nist_path, nist_ok);
-    if (!nist_ok || constants.empty()) {
-        std::cerr << "\033[31mError: could not parse NIST table. Re-run pull.\033[0m\n";
+    std::string nist_problem;
+    std::vector<Constant> constants = parse_nist(nist_path, nist_ok, nist_problem);
+    if (!nist_ok) {
+        std::cerr << "\033[31mError: " << nist_problem << ". Re-run pull, or update the parser.\033[0m\n";
         return true;
     }
 
