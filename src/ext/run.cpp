@@ -338,8 +338,9 @@ std::string build_report(const std::vector<Constant>& constants,
                 if (l > best_untag_lcp) { best_untag_lcp = l; best_untag = &s; }
             }
         }
+        // Untagged sequences may never claim an exact constant
         if ((!best || best_lcp < MIN_MATCH) &&
-            best_untag && best_untag_lcp >= STRONG_MATCH) {
+            best_untag && best_untag_lcp >= STRONG_MATCH && !c.exact) {
             best = best_untag;
             best_lcp = best_untag_lcp;
         }
