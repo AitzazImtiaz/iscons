@@ -41,7 +41,7 @@ configstr load_config(const std::string& path) {
         else if (key == "tagline") configuration.tagline = value;
         else if (key == "author") configuration.author = value;
         else if (key == "description") configuration.description = value;
-        else if (key == "hint") configuration.hint = value;
+        else if (key == "hint") configuration.hint = value + " ";
         else if (key == "prompt") configuration.prompt = value;
     }
     return configuration;
