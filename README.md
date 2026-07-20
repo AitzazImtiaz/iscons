@@ -29,8 +29,21 @@ sudo make install
 ./iscons
 ```
 
-After that, within REPL `update` command can be used to pull out fresh repository updates to install.
+After that, within REPL `update` command can be used to pull out fresh repository updates to install. After building you may run the `help` command to show options:
 
+```
+List of commands:
+  help - List all available commands
+  quit - Exit the program
+  exit - Exit the program
+  version - Show build info
+  fetch - Clone or update the local oeisdata repository
+  update - Pull the latest iscons source and oeisdata, then rebuild
+  pull - Download the NIST physical constants table into oeis/cons/allascii.txt
+  run - Cross-check NIST constants against OEIS cons sequences
+```
+
+The rotation on first-use is: `fetch`, `pull`, and `run`.
 ### Limitations
 
 The following things are limited to with no fixes yet:
@@ -38,6 +51,9 @@ The following things are limited to with no fixes yet:
 - Keyword 'cons' must be in the sequences. Without it, the entries will be ignored.
 - Unable to verify from filtered sequences if they are fixed on the main database as the git repository of data dump frequently takes larger time in a day to update.
 
+### AI Usage
+Use of AI was ONLY done to `src/ext/run.cpp` with descriptions of its functions given to Claude Fable 5. Other files had minor AI assistance of pointing me to correct
+sources with my own design decisions. This waiver only allows `src/ext/run.cpp` to be used without `LICENSE` conditions, other work is still within scope of GPL.
 ### References
 
 - https://github.com/oeis/oeisdata
