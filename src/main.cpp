@@ -3,10 +3,9 @@
 #include <sstream>
 #include <vector>
 #include <utility>
-#include <map>
-#include <functional>
 #include <readline/readline.h>
 #include <readline/history.h>
+#include "command_registry.h"
 
 struct configstr {
     std::string name, tagline, author, description, hint, prompt;
@@ -76,24 +75,32 @@ std::vector<std::pair<std::string, std::string>> load_commands(const std::string
 }
 
 void print_help(const std::vector<std::pair<std::string, std::string>>& cmds) {
-    std::cout << "Available commands:\n";
+    std::cout << "List of commands:\n";
     for (const auto& cmd : cmds) {
         std::cout << "  " << cmd.first << " - " << cmd.second << "\n";
     }
 }
+
+std::vector<std::pair<std::string, std::string>>& loaded_commands() {
+    static std::vector<std::pair<std::string, std::string>> cmds;
+    return cmds;
+}
+
+CommandRegistrar reg_help("help", []() {
+    print_help(loaded_commands());
+    return true;
+});
+CommandRegistrar reg_quit("quit", []() { return false; });
+CommandRegistrar reg_exit("exit", []() { return false; });
 
 int main() {
     configstr configuration = load_config(std::string(APP_ROOT) + "/src/config/iscons.conf");
     banner(configuration);
 
     auto commands = load_commands(std::string(APP_ROOT) + "/src/cmds.txt");
+    loaded_commands() = commands;
 
     bool running = true;
-
-    std::map<std::string, std::function<void()>> handlers;
-    handlers["help"] = [&]() { print_help(commands); };
-    handlers["quit"] = [&]() { running = false; };
-    handlers["exit"] = [&]() { running = false; };
 
     while (running) {
         char* line = readline(configuration.prompt.c_str());
@@ -117,9 +124,9 @@ int main() {
             continue;
         }
 
-        auto it = handlers.find(input);
-        if (it != handlers.end()) {
-            it->second();
+        auto it = registry().find(input);
+        if (it != registry().end()) {
+            running = it->second();
         } else {
             std::cout << input << ": not yet implemented\n";
         }
