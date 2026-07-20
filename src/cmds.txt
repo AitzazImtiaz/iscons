@@ -2,3 +2,4 @@ help - List all available commands
 quit - Exit the program
 exit - Exit the program
 version - Show build info
+fetch - Clone or update the local oeisdata repository
