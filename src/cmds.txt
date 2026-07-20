@@ -3,3 +3,4 @@ quit - Exit the program
 exit - Exit the program
 version - Show build info
 fetch - Clone or update the local oeisdata repository
+update - Pull the latest iscons source and oeisdata, then rebuild
