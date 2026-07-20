@@ -26,4 +26,19 @@ cd ~/iscons/build
 cmake ..
 make
 sudo make install
+./iscons
 ```
+
+After that, within REPL `update` command can be used to pull out fresh repository updates to install.
+
+### Limitations
+
+The following things are limited to with no fixes yet:
+
+- Keyword 'cons' must be in the sequences. Without it, the entries will be ignored.
+- Unable to verify from filtered sequences if they are fixed on the main database as the git repository of data dump frequently takes larger time in a day to update.
+
+### References
+
+- https://github.com/oeis/oeisdata
+- https://physics.nist.gov/cuu/Constants/Table/allascii.txt
