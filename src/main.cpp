@@ -3,6 +3,8 @@
 #include <sstream>
 #include <vector>
 #include <utility>
+#include <map>
+#include <functional>
 #include <readline/readline.h>
 #include <readline/history.h>
 
@@ -24,19 +26,16 @@ configstr load_config(const std::string& path) {
         std::cerr << "Warning: I can not open config file: " << path << "\n";
         return configuration;
     }
-
     bool is_command = false;
     std::string line;
     while (std::getline(file, line)) {
         line = trimmer(line);
         if (line.empty() || line[0] == '#') continue;
         if (line == "[commands]") { is_command = true; continue; }
-
         size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
         std::string key = trimmer(line.substr(0, eq));
         std::string value = trimmer(line.substr(eq + 1));
-
         if (is_command) {
             configuration.commands.emplace_back(key, value);
         } else if (key == "name") configuration.name = value;
@@ -56,28 +55,74 @@ void banner(const configstr& configuration) {
     std::cout << configuration.hint << "\n";
 }
 
+std::vector<std::pair<std::string, std::string>> load_commands(const std::string& path) {
+    std::vector<std::pair<std::string, std::string>> cmds;
+    std::ifstream file(path);
+    if (!file) {
+        std::cerr << "Warning: I can not open commands file: " << path << "\n";
+        return cmds;
+    }
+    std::string line;
+    while (std::getline(file, line)) {
+        line = trimmer(line);
+        if (line.empty() || line[0] == '#') continue;
+        size_t sep = line.find(" - ");
+        if (sep == std::string::npos) continue;
+        std::string name = trimmer(line.substr(0, sep));
+        std::string desc = trimmer(line.substr(sep + 3));
+        cmds.emplace_back(name, desc);
+    }
+    return cmds;
+}
+
+void print_help(const std::vector<std::pair<std::string, std::string>>& cmds) {
+    std::cout << "Available commands:\n";
+    for (const auto& cmd : cmds) {
+        std::cout << "  " << cmd.first << " - " << cmd.second << "\n";
+    }
+}
+
 int main() {
     configstr configuration = load_config(std::string(APP_ROOT) + "/src/config/iscons.conf");
     banner(configuration);
 
-    while (true) {
-        char* line = readline(configuration.prompt.c_str());
+    auto commands = load_commands(std::string(APP_ROOT) + "/src/cmds.txt");
 
+    bool running = true;
+
+    std::map<std::string, std::function<void()>> handlers;
+    handlers["help"] = [&]() { print_help(commands); };
+    handlers["quit"] = [&]() { running = false; };
+    handlers["exit"] = [&]() { running = false; };
+
+    while (running) {
+        char* line = readline(configuration.prompt.c_str());
         if (!line) {
             std::cout << "\n";
             break;
         }
-
         std::string input = trimmer(line);
         add_history(line);
+        free(line);
 
-        if (input == "quit" || input == "exit") {
-            free(line);
-            break;
+        if (input.empty()) continue;
+
+        bool unknown = true;
+        for (const auto& cmd : commands) {
+            if (cmd.first == input) { unknown = false; break; }
         }
 
-        std::cout << ">> " << input << "\n";
-        free(line);
+        if (unknown) {
+            std::cerr << "\033[31mError: I cannot find command \"" << input << "\". Type help for a list!\033[0m\n";
+            continue;
+        }
+
+        auto it = handlers.find(input);
+        if (it != handlers.end()) {
+            it->second();
+        } else {
+            std::cout << input << ": not yet implemented\n";
+        }
     }
 
     return 0;
