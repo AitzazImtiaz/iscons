@@ -17,7 +17,7 @@ namespace {
 
 const size_t MIN_MATCH = 6;
 const size_t MIN_NIST_ROWS = 300;
-const char* INDEX_FORMAT = "FORMAT 2";
+const char* INDEX_FORMAT = "FORMAT 3";
 
 struct Constant {
     std::string name, unit;
@@ -275,16 +275,16 @@ bool build_index(const std::string& seq_dir, const std::string& index_path,
             if (term.size() != 1 || term[0] < '0' || term[0] > '9') { regular = false; break; }
             digits += term;
         }
+        if (digits.size() < MIN_MATCH) continue;
         int flags = 0;
         if (kw_cons) flags |= 1;
-        if (!regular) { flags |= 2; digits.clear(); ++flagged; }
-        if (regular && digits.size() < MIN_MATCH) continue;
+        if (!regular) { flags |= 2; ++flagged; }
         out << entry.path().stem().string() << "\t" << flags << "\t" << offset
             << "\t" << digits << "\t" << name << "\n";
         ++kept;
     }
     std::cout << "Indexed " << kept << " decimal-expansion sequences out of " << scanned
-              << " files (" << flagged << " with malformed data).\n";
+              << " files (" << flagged << " with irregular data).\n";
     return true;
 }
 
@@ -337,18 +337,33 @@ std::string utc_now(const char* fmt) {
 std::string build_report(const std::vector<Constant>& constants,
                          const std::vector<ConsSeq>& seqs) {
     std::ostringstream updates, fixes, missing;
-    size_t ok_count = 0, upd_count = 0, fix_count = 0, miss_count = 0, skip_count = 0;
+    size_t ok_count = 0, upd_count = 0, fix_count = 0, miss_count = 0,
+           skip_count = 0, malformed_count = 0;
 
     for (const auto& c : constants) {
         if (c.certain.size() < MIN_MATCH) { ++skip_count; continue; }
         const ConsSeq* best = nullptr;
         size_t best_lcp = 0;
+        const ConsSeq* best_mal = nullptr;
+        size_t best_mal_lcp = 0;
         for (const auto& s : seqs) {
-            if (s.malformed) continue;
             size_t l = lcp_len(c.certain, s.digits);
-            if (l > best_lcp) { best_lcp = l; best = &s; }
+            if (s.malformed) {
+                if (l > best_mal_lcp) { best_mal_lcp = l; best_mal = &s; }
+            } else if (l > best_lcp) {
+                best_lcp = l;
+                best = &s;
+            }
+        }
+        bool mal_hit = best_mal && best_mal_lcp >= MIN_MATCH;
+        if (mal_hit) {
+            fixes << best_mal->anum << "  " << c.name
+                  << " | matches this constant but data terms are not single decimal digits\n";
+            ++fix_count;
+            ++malformed_count;
         }
         if (!best || best_lcp < MIN_MATCH) {
+            if (mal_hit) continue;
             missing << c.name << "  [" << c.certain.size() << " certain digits: "
                     << c.certain << "]";
             if (!c.unit.empty()) missing << "  " << c.unit;
@@ -384,15 +399,6 @@ std::string build_report(const std::vector<Constant>& constants,
             flagged = true;
         }
         if (!flagged) ++ok_count;
-    }
-
-    size_t malformed_count = 0;
-    for (const auto& s : seqs) {
-        if (!s.malformed) continue;
-        fixes << s.anum << "  " << s.name
-              << " | data terms are not single decimal digits (malformed)\n";
-        ++fix_count;
-        ++malformed_count;
     }
 
     std::ostringstream r;
