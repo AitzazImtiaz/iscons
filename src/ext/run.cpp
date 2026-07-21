@@ -7,6 +7,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <set>
 #include "command_registry.h"
 
 namespace fs = std::filesystem;
@@ -306,17 +307,20 @@ bool names_overlap(const std::string& a, const std::string& b) {
 
 std::string build_report(const std::vector<Constant>& constants,
                          const std::vector<ConsSeq>& seqs) {
-    std::ostringstream updates, fixes, missing;
-    size_t ok_count = 0, upd_count = 0, fix_count = 0, miss_count = 0, skip_count = 0;
+    std::ostringstream updates, fixes, missing, review;
+    size_t ok_count = 0, upd_count = 0, fix_count = 0, miss_count = 0,
+           skip_count = 0, ambig_count = 0, review_count = 0;
+    std::set<std::string> update_anums, fix_anums;   // dedupe synonym constants
 
     for (const auto& c : constants) {
         if (c.certain.size() < MIN_MATCH) { ++skip_count; continue; }
-        // MY CODE
+
         const ConsSeq* best = nullptr;
         size_t best_lcp = 0, second_lcp = 0;
         int best_ties = 0;
         for (const auto& s : seqs) {
-            if (!names_overlap(c.name, s.name)) continue;
+            if (s.offset != c.offset) continue;           // magnitude must agree
+            if (!names_overlap(c.name, s.name)) continue; // names must share a word
             size_t l = lcp_len(c.certain, s.digits);
             if (l > best_lcp) {
                 second_lcp = best_lcp;
@@ -326,9 +330,28 @@ std::string build_report(const std::vector<Constant>& constants,
             } else if (l > second_lcp) {
                 second_lcp = l;
             }
-        // END OF MY CODE
         }
+
         if (!best || best_lcp < MIN_MATCH) {
+            // Second pass: same digits at a DIFFERENT magnitude?
+            // That's either a unit/scale variant (ignore) or a real
+            // offset error in OEIS (rare) — a human decides, so it
+            // goes to REVIEW, never to FIX.
+            const ConsSeq* alt = nullptr;
+            size_t alt_lcp = 0;
+            for (const auto& s : seqs) {
+                if (s.offset == c.offset) continue;
+                if (!names_overlap(c.name, s.name)) continue;
+                size_t l = lcp_len(c.certain, s.digits);
+                if (l > alt_lcp) { alt_lcp = l; alt = &s; }
+            }
+            if (alt && alt_lcp >= MIN_MATCH + 2) {
+                review << alt->anum << "  " << c.name << " | digits agree to "
+                       << alt_lcp << ", but offset " << alt->offset
+                       << " vs computed " << c.offset << "\n";
+                ++review_count;
+                continue;
+            }
             missing << c.name << "  [" << c.certain.size() << " certain digits: "
                     << c.certain << "]";
             if (!c.unit.empty()) missing << "  " << c.unit;
@@ -336,34 +359,32 @@ std::string build_report(const std::vector<Constant>& constants,
             ++miss_count;
             continue;
         }
-        // MY CODE
-        if (best_ties > 1 || (best_lcp - second_lcp) < 1) {
-            ++skip_count;
+
+        if (best_ties > 1) {           // two sequences tied — refuse to guess
+            ++ambig_count;
             continue;
         }
-        // END OF MY CODE
-        bool flagged = false;
+
         if (best_lcp == best->digits.size() && best->digits.size() < c.certain.size()) {
-            updates << best->anum << "  " << c.name << " | has "
-                    << best->digits.size() << " digits, certain to "
-                    << c.certain.size() << ", append: "
-                    << c.certain.substr(best->digits.size()) << "\n";
-            ++upd_count;
-            flagged = true;
+            if (update_anums.insert(best->anum).second) {
+                updates << best->anum << "  " << c.name << " | has "
+                        << best->digits.size() << " digits, certain to "
+                        << c.certain.size() << ", append: "
+                        << c.certain.substr(best->digits.size()) << "\n";
+                ++upd_count;
+            }
         } else if (best_lcp < c.certain.size() && best_lcp < best->digits.size()) {
-            fixes << best->anum << "  " << c.name << " | digit mismatch at position "
-                  << (best_lcp + 1) << ": seq '" << best->digits[best_lcp]
-                  << "' vs CODATA '" << c.certain[best_lcp] << "'\n";
-            ++fix_count;
-            flagged = true;
+            if (fix_anums.insert(best->anum).second) {
+                fixes << best->anum << "  " << c.name << " | digit mismatch at position "
+                      << (best_lcp + 1) << ": seq '" << best->digits[best_lcp]
+                      << "' vs CODATA '" << c.certain[best_lcp] << "'\n";
+                ++fix_count;
+            }
+        } else {
+            ++ok_count;
         }
-        if (best->offset != c.offset) {
-            fixes << best->anum << "  " << c.name << " | offset " << best->offset
-                  << " vs expected " << c.offset << "\n";
-            ++fix_count;
-            flagged = true;
-        }
-        if (!flagged) ++ok_count;
+        // NOTE: post-hoc offset check deleted — a mismatched offset can
+        // no longer become `best`, so that branch is dead by construction.
     }
 
     std::ostringstream r;
@@ -372,10 +393,13 @@ std::string build_report(const std::vector<Constant>& constants,
     r << (upd_count ? updates.str() : "(none)\n");
     r << "\nOEIS SEQUENCES NEEDING FIX:\n\n";
     r << (fix_count ? fixes.str() : "(none)\n");
+    r << "\nREVIEW (offset differs — unit variant or real error?):\n\n";
+    r << (review_count ? review.str() : "(none)\n");
     r << "\nOEIS MISSING CONSTANTS:\n\n";
     r << (miss_count ? missing.str() : "(none)\n");
     r << "\nSUMMARY: " << ok_count << " consistent, " << upd_count << " need update, "
-      << fix_count << " need fix, " << miss_count << " missing, "
+      << fix_count << " need fix, " << review_count << " to review, "
+      << ambig_count << " ambiguous (skipped), " << miss_count << " missing, "
       << skip_count << " skipped (fewer than " << MIN_MATCH << " certain digits), "
       << seqs.size() << " cons sequences indexed.\n";
     return r.str();
