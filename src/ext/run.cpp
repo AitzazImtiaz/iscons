@@ -153,7 +153,7 @@ std::vector<Constant> parse_nist(const std::string& path, bool& ok) {
     while (std::getline(file, line)) {
         if (!in_data) {
             std::string t = rtrim(line);
-            if (t.size() > 20 && t.find_first_not_of('-') == std::string::npos) in_data = true;
+            if (t.size() > 20 && t.find_first_not_of("- ") == std::string::npos && t.find('-') != std::string::npos) in_data = true; // My edit
             continue;
         }
         if (rtrim(line).empty()) continue;
@@ -202,7 +202,7 @@ bool build_index(const std::string& seq_dir, const std::string& index_path,
                  const std::string& time_key) {
     std::ofstream out(index_path);
     if (!out) return false;
-    out << "TIME\t" << time_key << "\n";
+    out << "TIME\t" << time_key << "\tMINMATCH\t" << MIN_MATCH << "\tSCHEMA\t2\n"; // My change
     size_t scanned = 0, kept = 0;
     for (auto& entry : fs::recursive_directory_iterator(seq_dir)) {
         if (!entry.is_regular_file() || entry.path().extension() != ".seq") continue;
@@ -252,7 +252,7 @@ std::vector<ConsSeq> load_index(const std::string& index_path, const std::string
     if (!file) return out;
     std::string line;
     if (!std::getline(file, line)) return out;
-    if (line != "TIME\t" + time_key) return out;
+    if (line != "TIME\t" + time_key + "\tMINMATCH\t" + std::to_string(MIN_MATCH) + "\tSCHEMA\t2") return out; // My edit
     while (std::getline(file, line)) {
         size_t t1 = line.find('\t');
         size_t t2 = line.find('\t', t1 + 1);
@@ -283,6 +283,27 @@ std::string utc_now(const char* fmt) {
     return std::string(buf);
 }
 
+// MY CODE
+std::vector<std::string> name_tokens(const std::string& s) {
+    std::vector<std::string> toks;
+    std::string cur;
+    for (char c : s) {
+        if (std::isalpha((unsigned char)c)) cur += (char)std::tolower((unsigned char)c);
+        else { if (cur.size() >= 3) toks.push_back(cur); cur.clear(); }
+    }
+    if (cur.size() >= 3) toks.push_back(cur);
+    return toks;
+}
+
+bool names_overlap(const std::string& a, const std::string& b) {
+    auto ta = name_tokens(a), tb = name_tokens(b);
+    for (auto& x : ta)
+        for (auto& y : tb)
+            if (x == y) return true;
+    return false;
+}
+// END OF MY CODE
+
 std::string build_report(const std::vector<Constant>& constants,
                          const std::vector<ConsSeq>& seqs) {
     std::ostringstream updates, fixes, missing;
@@ -290,11 +311,22 @@ std::string build_report(const std::vector<Constant>& constants,
 
     for (const auto& c : constants) {
         if (c.certain.size() < MIN_MATCH) { ++skip_count; continue; }
+        // MY CODE
         const ConsSeq* best = nullptr;
-        size_t best_lcp = 0;
+        size_t best_lcp = 0, second_lcp = 0;
+        int best_ties = 0;
         for (const auto& s : seqs) {
+            if (!names_overlap(c.name, s.name)) continue;
             size_t l = lcp_len(c.certain, s.digits);
-            if (l > best_lcp) { best_lcp = l; best = &s; }
+            if (l > best_lcp) {
+                second_lcp = best_lcp;
+                best_lcp = l; best = &s; best_ties = 1;
+            } else if (l == best_lcp && best_lcp > 0) {
+                ++best_ties;
+            } else if (l > second_lcp) {
+                second_lcp = l;
+            }
+        // END OF MY CODE
         }
         if (!best || best_lcp < MIN_MATCH) {
             missing << c.name << "  [" << c.certain.size() << " certain digits: "
@@ -304,6 +336,12 @@ std::string build_report(const std::vector<Constant>& constants,
             ++miss_count;
             continue;
         }
+        // MY CODE
+        if (best_ties > 1 || (best_lcp - second_lcp) < 1) {
+            ++skip_count;
+            continue;
+        }
+        // END OF MY CODE
         bool flagged = false;
         if (best_lcp == best->digits.size() && best->digits.size() < c.certain.size()) {
             updates << best->anum << "  " << c.name << " | has "
