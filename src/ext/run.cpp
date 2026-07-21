@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -17,15 +18,21 @@ namespace {
 // ── tuning knobs ─────────────────────────────────────────────────────────
 const size_t MIN_MATCH  = 6;              // min certified digits to consider a constant
 const size_t REVIEW_LCP = MIN_MATCH + 2;  // digit agreement needed for the REVIEW bucket
-const int    IDX_SCHEMA = 2;              // bump when the index line format changes
+const int    IDX_SCHEMA = 3;              // bump when the index line format changes
 
 struct Constant {
     std::string name, unit;
-    std::string digits;
-    long ls_exp = 0;
+    std::string digits;        // significant digits of the central value
+    long ls_exp = 0;           // exponent of the least-significant stored digit
     bool exact = false;
-    std::string certain;
-    long offset = 0;
+    bool value_truncated = false;  // NIST value ended with "..." (exact rationals)
+    std::string certain;       // digits certified by the +-uncertainty interval
+    long offset = 0;           // OEIS-style offset (digits left of decimal point)
+    // interval bounds [lo, hi] as digit strings sharing bound_ls
+    bool have_bounds = false;
+    std::string lo, hi;
+    long bound_ls = 0;
+    bool hi_open = false;      // hi continues (pad with '9'): truncated exact values
 };
 
 struct ConsSeq {
@@ -74,11 +81,12 @@ std::vector<std::string> split_columns(const std::string& line) {
     return cols;
 }
 
-bool parse_number(std::string text, std::string& digits, long& ls_exp) {
+bool parse_number(std::string text, std::string& digits, long& ls_exp, bool& truncated) {
+    truncated = false;
     std::string t;
     for (char c : text) if (c != ' ') t += c;
     size_t dots = t.find("...");
-    if (dots != std::string::npos) t.erase(dots, 3);
+    if (dots != std::string::npos) { t.erase(dots, 3); truncated = true; }
     if (!t.empty() && (t[0] == '-' || t[0] == '+')) t.erase(0, 1);
     long e = 0;
     size_t epos = t.find('e');
@@ -97,6 +105,11 @@ bool parse_number(std::string text, std::string& digits, long& ls_exp) {
     digits = strip_leading_zeros(t);
     ls_exp = e - frac;
     return true;
+}
+
+bool parse_number(std::string text, std::string& digits, long& ls_exp) {
+    bool trunc;
+    return parse_number(std::move(text), digits, ls_exp, trunc);
 }
 
 std::string add_digits(const std::string& a, const std::string& b) {
@@ -132,16 +145,40 @@ std::string sub_digits(const std::string& a, const std::string& b) {
     return r;
 }
 
-void compute_certain(Constant& c, const std::string& unc_digits, long unc_ls, bool exact) {
+// Compare two magnitude-aligned digit strings: a has least-significant
+// exponent lsa, b has lsb. Both are padded down to the finer exponent with
+// the given pad character ('0' for a closed bound, '9' for an open upper
+// range). Assumes no leading zeros (same offset alignment upstream).
+int cmp_aligned(const std::string& a, long lsa, char pada,
+                const std::string& b, long lsb, char padb) {
+    long ls = std::min(lsa, lsb);
+    std::string A = a + std::string((size_t)(lsa - ls), pada);
+    std::string B = b + std::string((size_t)(lsb - ls), padb);
+    return cmp_digits(A, B);
+}
+
+void compute_bounds(Constant& c, const std::string& unc_digits, long unc_ls, bool exact) {
     c.offset = (long)c.digits.size() + c.ls_exp;
-    if (exact) { c.exact = true; c.certain = c.digits; return; }
+    if (exact) {
+        c.exact = true;
+        c.certain = c.digits;
+        c.lo = c.digits;
+        c.hi = c.digits;
+        c.bound_ls = c.ls_exp;
+        c.hi_open = c.value_truncated;   // "22.4139..." keeps going
+        c.have_bounds = true;
+        return;
+    }
     long common_ls = std::min(c.ls_exp, unc_ls);
-    std::string vd = c.digits + std::string(c.ls_exp - common_ls, '0');
-    std::string ud = strip_leading_zeros(unc_digits) + std::string(unc_ls - common_ls, '0');
-    if (cmp_digits(vd, ud) <= 0) { c.certain = ""; return; }
+    std::string vd = c.digits + std::string((size_t)(c.ls_exp - common_ls), '0');
+    std::string ud = strip_leading_zeros(unc_digits) + std::string((size_t)(unc_ls - common_ls), '0');
+    if (cmp_digits(vd, ud) <= 0) { c.certain = ""; return; }   // unc >= value: unusable
     std::string hi = add_digits(vd, ud);
     std::string lo = sub_digits(vd, ud);
-    if (hi.size() != lo.size()) { c.certain = ""; return; }
+    c.lo = lo; c.hi = hi; c.bound_ls = common_ls;
+    c.hi_open = false;
+    c.have_bounds = true;
+    if (hi.size() != lo.size()) { c.certain = ""; return; }    // magnitude straddle
     size_t k = 0;
     while (k < hi.size() && hi[k] == lo[k]) ++k;
     c.certain = hi.substr(0, std::min(k, c.digits.size()));
@@ -157,7 +194,6 @@ std::vector<Constant> parse_nist(const std::string& path, bool& ok) {
     while (std::getline(file, line)) {
         if (!in_data) {
             std::string t = rtrim(line);
-            // separator line: dashes (possibly space-separated columns), >20 chars
             if (t.size() > 20 && t.find_first_not_of("- ") == std::string::npos
                 && t.find('-') != std::string::npos) in_data = true;
             continue;
@@ -168,12 +204,12 @@ std::vector<Constant> parse_nist(const std::string& path, bool& ok) {
         Constant c;
         c.name = cols[0];
         c.unit = cols.size() >= 4 ? cols[3] : "";
-        if (!parse_number(cols[1], c.digits, c.ls_exp)) continue;
+        if (!parse_number(cols[1], c.digits, c.ls_exp, c.value_truncated)) continue;
         bool exact = cols[2].find("exact") != std::string::npos;
         std::string ud;
         long uls = 0;
         if (!exact && !parse_number(cols[2], ud, uls)) continue;
-        compute_certain(c, ud, uls, exact);
+        compute_bounds(c, ud, uls, exact);
         out.push_back(c);
     }
     ok = in_data;
@@ -249,7 +285,6 @@ bool build_index(const std::string& seq_dir, const std::string& index_path,
         }
         if (!regular || digits.size() < MIN_MATCH) continue;
         if (!has_offset) continue;
-        // tabs inside %N would corrupt the index line format — sanitize
         std::replace(name.begin(), name.end(), '\t', ' ');
         out << entry.path().stem().string() << "\t" << offset << "\t" << digits << "\t" << name << "\n";
         ++kept;
@@ -265,7 +300,7 @@ std::vector<ConsSeq> load_index(const std::string& index_path, const std::string
     if (!file) return out;
     std::string line;
     if (!std::getline(file, line)) return out;
-    if (line != index_header(time_key)) return out;   // stale on data OR knob OR schema change
+    if (line != index_header(time_key)) return out;
     while (std::getline(file, line)) {
         size_t t1 = line.find('\t');
         size_t t2 = line.find('\t', t1 + 1);
@@ -297,9 +332,6 @@ std::string utc_now(const char* fmt) {
 }
 
 // ── name matching ────────────────────────────────────────────────────────
-// Tokens that appear in nearly every constant name and carry no identity.
-// Overlap must occur on a CONTENT word — this is what separates
-// "conventional value of volt-90" from "conventional value of watt-90".
 bool is_stopword(const std::string& t) {
     static const std::set<std::string> stop = {
         "the", "and", "for", "value", "values",
@@ -330,20 +362,32 @@ bool names_overlap(const std::string& a, const std::string& b) {
     return false;
 }
 
+// ── interval consistency ─────────────────────────────────────────────────
+// A sequence with digits D at the constant's offset represents the value
+// range [D, D+1) in its last place. It is consistent with CODATA iff that
+// range overlaps [lo, hi]. This catches a stale trailing digit (a value
+// provably outside the interval) even when the digit position itself is
+// not individually certified — the A081813 case.
+bool seq_in_interval(const Constant& c, const ConsSeq& s) {
+    if (!c.have_bounds) return true;   // nothing to test against
+    long ls_seq = c.offset - (long)s.digits.size();
+    // seq upper end (D999...) must reach lo; seq lower end (D000...) must not exceed hi
+    if (cmp_aligned(s.digits, ls_seq, '9', c.lo, c.bound_ls, '0') < 0) return false;
+    if (cmp_aligned(s.digits, ls_seq, '0', c.hi, c.bound_ls, c.hi_open ? '9' : '0') > 0) return false;
+    return true;
+}
+
 // ── report ───────────────────────────────────────────────────────────────
 std::string build_report(const std::vector<Constant>& constants,
                          const std::vector<ConsSeq>& seqs) {
     std::ostringstream updates, fixes, review, missing;
     size_t ok_count = 0, upd_count = 0, fix_count = 0, review_count = 0,
            ambig_count = 0, miss_count = 0, skip_count = 0;
-    std::set<std::string> update_anums, fix_anums;   // dedupe NIST synonym rows
+    std::set<std::string> update_anums, fix_anums;
 
     for (const auto& c : constants) {
         if (c.certain.size() < MIN_MATCH) { ++skip_count; continue; }
 
-        // Primary match: SAME magnitude (offset) AND a shared content word.
-        // A sequence for the same constant must satisfy both; anything that
-        // fails either is, at best, a unit variant — never a "fix" target.
         const ConsSeq* best = nullptr;
         size_t best_lcp = 0;
         int best_ties = 0;
@@ -359,9 +403,6 @@ std::string build_report(const std::vector<Constant>& constants,
         }
 
         if (!best || best_lcp < MIN_MATCH) {
-            // Relaxed pass: same digits at a DIFFERENT magnitude. Either a
-            // unit/scale variant (usual) or a genuinely wrong OEIS offset
-            // (rare). A human decides — this bucket is never auto-submitted.
             const ConsSeq* alt = nullptr;
             size_t alt_lcp = 0;
             for (const auto& s : seqs) {
@@ -386,12 +427,23 @@ std::string build_report(const std::vector<Constant>& constants,
             continue;
         }
 
-        if (best_ties > 1) {   // two sequences tied at max LCP — refuse to guess
-            ++ambig_count;
-            continue;
-        }
+        if (best_ties > 1) { ++ambig_count; continue; }
 
-        if (best_lcp == best->digits.size() && best->digits.size() < c.certain.size()) {
+        if (!seq_in_interval(c, *best)) {
+            // sequence value provably outside CODATA's value +- uncertainty
+            if (fix_anums.insert(best->anum).second) {
+                size_t p = lcp_len(best->digits, c.digits);
+                fixes << best->anum << "  NIST: " << c.name
+                      << "\n         seq:  " << best->name
+                      << "\n         value outside CODATA interval; first difference at position "
+                      << (p + 1) << ": seq '"
+                      << (p < best->digits.size() ? best->digits[p] : '?')
+                      << "' vs CODATA '"
+                      << (p < c.digits.size() ? c.digits[p] : '?')
+                      << "'  (CODATA digits: " << c.digits << ")\n";
+                ++fix_count;
+            }
+        } else if (best_lcp == best->digits.size() && best->digits.size() < c.certain.size()) {
             if (update_anums.insert(best->anum).second) {
                 updates << best->anum << "  NIST: " << c.name
                         << "\n         seq:  " << best->name
@@ -400,26 +452,16 @@ std::string build_report(const std::vector<Constant>& constants,
                         << ", append: " << c.certain.substr(best->digits.size()) << "\n";
                 ++upd_count;
             }
-        } else if (best_lcp < c.certain.size() && best_lcp < best->digits.size()) {
-            if (fix_anums.insert(best->anum).second) {
-                fixes << best->anum << "  NIST: " << c.name
-                      << "\n         seq:  " << best->name
-                      << "\n         digit mismatch at position " << (best_lcp + 1)
-                      << ": seq '" << best->digits[best_lcp]
-                      << "' vs CODATA '" << c.certain[best_lcp] << "'\n";
-                ++fix_count;
-            }
         } else {
             ++ok_count;
         }
-        // No post-hoc offset check: mismatched offsets can't become `best`.
     }
 
     std::ostringstream r;
     r << "TIMESTAMP UTC " << utc_now("%Y-%m-%d %H:%M:%S") << "\n\n";
     r << "OEIS SEQUENCES NEEDING UPDATE (verify seq name matches NIST name before submitting):\n\n";
     r << (upd_count ? updates.str() : "(none)\n");
-    r << "\nOEIS SEQUENCES NEEDING FIX (VERIFY MANUALLY before submitting — open the entry):\n\n";
+    r << "\nOEIS SEQUENCES NEEDING FIX (value contradicts CODATA; VERIFY MANUALLY before submitting):\n\n";
     r << (fix_count ? fixes.str() : "(none)\n");
     r << "\nREVIEW (offset differs — unit variant or real error?; never auto-submit):\n\n";
     r << (review_count ? review.str() : "(none)\n");
