@@ -4,17 +4,20 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
-#include <set>
 #include "command_registry.h"
 
 namespace fs = std::filesystem;
 
 namespace {
 
-const size_t MIN_MATCH = 6;
+// ── tuning knobs ─────────────────────────────────────────────────────────
+const size_t MIN_MATCH  = 6;              // min certified digits to consider a constant
+const size_t REVIEW_LCP = MIN_MATCH + 2;  // digit agreement needed for the REVIEW bucket
+const int    IDX_SCHEMA = 2;              // bump when the index line format changes
 
 struct Constant {
     std::string name, unit;
@@ -154,7 +157,9 @@ std::vector<Constant> parse_nist(const std::string& path, bool& ok) {
     while (std::getline(file, line)) {
         if (!in_data) {
             std::string t = rtrim(line);
-            if (t.size() > 20 && t.find_first_not_of("- ") == std::string::npos && t.find('-') != std::string::npos) in_data = true; // My edit
+            // separator line: dashes (possibly space-separated columns), >20 chars
+            if (t.size() > 20 && t.find_first_not_of("- ") == std::string::npos
+                && t.find('-') != std::string::npos) in_data = true;
             continue;
         }
         if (rtrim(line).empty()) continue;
@@ -199,11 +204,16 @@ bool has_cons_keyword(const std::string& kline) {
     return false;
 }
 
+std::string index_header(const std::string& time_key) {
+    return "TIME\t" + time_key + "\tMINMATCH\t" + std::to_string(MIN_MATCH)
+         + "\tSCHEMA\t" + std::to_string(IDX_SCHEMA);
+}
+
 bool build_index(const std::string& seq_dir, const std::string& index_path,
                  const std::string& time_key) {
     std::ofstream out(index_path);
     if (!out) return false;
-    out << "TIME\t" << time_key << "\tMINMATCH\t" << MIN_MATCH << "\tSCHEMA\t2\n"; // My change
+    out << index_header(time_key) << "\n";
     size_t scanned = 0, kept = 0;
     for (auto& entry : fs::recursive_directory_iterator(seq_dir)) {
         if (!entry.is_regular_file() || entry.path().extension() != ".seq") continue;
@@ -239,6 +249,8 @@ bool build_index(const std::string& seq_dir, const std::string& index_path,
         }
         if (!regular || digits.size() < MIN_MATCH) continue;
         if (!has_offset) continue;
+        // tabs inside %N would corrupt the index line format — sanitize
+        std::replace(name.begin(), name.end(), '\t', ' ');
         out << entry.path().stem().string() << "\t" << offset << "\t" << digits << "\t" << name << "\n";
         ++kept;
     }
@@ -253,7 +265,7 @@ std::vector<ConsSeq> load_index(const std::string& index_path, const std::string
     if (!file) return out;
     std::string line;
     if (!std::getline(file, line)) return out;
-    if (line != "TIME\t" + time_key + "\tMINMATCH\t" + std::to_string(MIN_MATCH) + "\tSCHEMA\t2") return out; // My edit
+    if (line != index_header(time_key)) return out;   // stale on data OR knob OR schema change
     while (std::getline(file, line)) {
         size_t t1 = line.find('\t');
         size_t t2 = line.find('\t', t1 + 1);
@@ -284,7 +296,19 @@ std::string utc_now(const char* fmt) {
     return std::string(buf);
 }
 
-// MY CODE
+// ── name matching ────────────────────────────────────────────────────────
+// Tokens that appear in nearly every constant name and carry no identity.
+// Overlap must occur on a CONTENT word — this is what separates
+// "conventional value of volt-90" from "conventional value of watt-90".
+bool is_stopword(const std::string& t) {
+    static const std::set<std::string> stop = {
+        "the", "and", "for", "value", "values",
+        "conventional", "relationship", "constant", "constants",
+        "decimal", "expansion", "equivalent"
+    };
+    return stop.count(t) > 0;
+}
+
 std::vector<std::string> name_tokens(const std::string& s) {
     std::vector<std::string> toks;
     std::string cur;
@@ -298,45 +322,46 @@ std::vector<std::string> name_tokens(const std::string& s) {
 
 bool names_overlap(const std::string& a, const std::string& b) {
     auto ta = name_tokens(a), tb = name_tokens(b);
-    for (auto& x : ta)
+    for (auto& x : ta) {
+        if (is_stopword(x)) continue;
         for (auto& y : tb)
             if (x == y) return true;
+    }
     return false;
 }
-// END OF MY CODE
 
+// ── report ───────────────────────────────────────────────────────────────
 std::string build_report(const std::vector<Constant>& constants,
                          const std::vector<ConsSeq>& seqs) {
-    std::ostringstream updates, fixes, missing, review;
-    size_t ok_count = 0, upd_count = 0, fix_count = 0, miss_count = 0,
-           skip_count = 0, ambig_count = 0, review_count = 0;
-    std::set<std::string> update_anums, fix_anums;   // dedupe synonym constants
+    std::ostringstream updates, fixes, review, missing;
+    size_t ok_count = 0, upd_count = 0, fix_count = 0, review_count = 0,
+           ambig_count = 0, miss_count = 0, skip_count = 0;
+    std::set<std::string> update_anums, fix_anums;   // dedupe NIST synonym rows
 
     for (const auto& c : constants) {
         if (c.certain.size() < MIN_MATCH) { ++skip_count; continue; }
 
+        // Primary match: SAME magnitude (offset) AND a shared content word.
+        // A sequence for the same constant must satisfy both; anything that
+        // fails either is, at best, a unit variant — never a "fix" target.
         const ConsSeq* best = nullptr;
-        size_t best_lcp = 0, second_lcp = 0;
+        size_t best_lcp = 0;
         int best_ties = 0;
         for (const auto& s : seqs) {
-            if (s.offset != c.offset) continue;           // magnitude must agree
-            if (!names_overlap(c.name, s.name)) continue; // names must share a word
+            if (s.offset != c.offset) continue;
+            if (!names_overlap(c.name, s.name)) continue;
             size_t l = lcp_len(c.certain, s.digits);
             if (l > best_lcp) {
-                second_lcp = best_lcp;
                 best_lcp = l; best = &s; best_ties = 1;
             } else if (l == best_lcp && best_lcp > 0) {
                 ++best_ties;
-            } else if (l > second_lcp) {
-                second_lcp = l;
             }
         }
 
         if (!best || best_lcp < MIN_MATCH) {
-            // Second pass: same digits at a DIFFERENT magnitude?
-            // That's either a unit/scale variant (ignore) or a real
-            // offset error in OEIS (rare) — a human decides, so it
-            // goes to REVIEW, never to FIX.
+            // Relaxed pass: same digits at a DIFFERENT magnitude. Either a
+            // unit/scale variant (usual) or a genuinely wrong OEIS offset
+            // (rare). A human decides — this bucket is never auto-submitted.
             const ConsSeq* alt = nullptr;
             size_t alt_lcp = 0;
             for (const auto& s : seqs) {
@@ -345,10 +370,11 @@ std::string build_report(const std::vector<Constant>& constants,
                 size_t l = lcp_len(c.certain, s.digits);
                 if (l > alt_lcp) { alt_lcp = l; alt = &s; }
             }
-            if (alt && alt_lcp >= MIN_MATCH + 2) {
-                review << alt->anum << "  " << c.name << " | digits agree to "
-                       << alt_lcp << ", but offset " << alt->offset
-                       << " vs computed " << c.offset << "\n";
+            if (alt && alt_lcp >= REVIEW_LCP) {
+                review << alt->anum << "  NIST: " << c.name
+                       << "\n         seq:  " << alt->name
+                       << "\n         digits agree to " << alt_lcp
+                       << ", offset " << alt->offset << " vs computed " << c.offset << "\n";
                 ++review_count;
                 continue;
             }
@@ -360,40 +386,42 @@ std::string build_report(const std::vector<Constant>& constants,
             continue;
         }
 
-        if (best_ties > 1) {           // two sequences tied — refuse to guess
+        if (best_ties > 1) {   // two sequences tied at max LCP — refuse to guess
             ++ambig_count;
             continue;
         }
 
         if (best_lcp == best->digits.size() && best->digits.size() < c.certain.size()) {
             if (update_anums.insert(best->anum).second) {
-                updates << best->anum << "  " << c.name << " | has "
-                        << best->digits.size() << " digits, certain to "
-                        << c.certain.size() << ", append: "
-                        << c.certain.substr(best->digits.size()) << "\n";
+                updates << best->anum << "  NIST: " << c.name
+                        << "\n         seq:  " << best->name
+                        << "\n         has " << best->digits.size()
+                        << " digits, certain to " << c.certain.size()
+                        << ", append: " << c.certain.substr(best->digits.size()) << "\n";
                 ++upd_count;
             }
         } else if (best_lcp < c.certain.size() && best_lcp < best->digits.size()) {
             if (fix_anums.insert(best->anum).second) {
-                fixes << best->anum << "  " << c.name << " | digit mismatch at position "
-                      << (best_lcp + 1) << ": seq '" << best->digits[best_lcp]
+                fixes << best->anum << "  NIST: " << c.name
+                      << "\n         seq:  " << best->name
+                      << "\n         digit mismatch at position " << (best_lcp + 1)
+                      << ": seq '" << best->digits[best_lcp]
                       << "' vs CODATA '" << c.certain[best_lcp] << "'\n";
                 ++fix_count;
             }
         } else {
             ++ok_count;
         }
-        // NOTE: post-hoc offset check deleted — a mismatched offset can
-        // no longer become `best`, so that branch is dead by construction.
+        // No post-hoc offset check: mismatched offsets can't become `best`.
     }
 
     std::ostringstream r;
     r << "TIMESTAMP UTC " << utc_now("%Y-%m-%d %H:%M:%S") << "\n\n";
-    r << "OEIS SEQUENCES NEEDING UPDATE:\n\n";
+    r << "OEIS SEQUENCES NEEDING UPDATE (verify seq name matches NIST name before submitting):\n\n";
     r << (upd_count ? updates.str() : "(none)\n");
-    r << "\nOEIS SEQUENCES NEEDING FIX:\n\n";
+    r << "\nOEIS SEQUENCES NEEDING FIX (VERIFY MANUALLY before submitting — open the entry):\n\n";
     r << (fix_count ? fixes.str() : "(none)\n");
-    r << "\nREVIEW (offset differs — unit variant or real error?):\n\n";
+    r << "\nREVIEW (offset differs — unit variant or real error?; never auto-submit):\n\n";
     r << (review_count ? review.str() : "(none)\n");
     r << "\nOEIS MISSING CONSTANTS:\n\n";
     r << (miss_count ? missing.str() : "(none)\n");
