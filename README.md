@@ -50,10 +50,14 @@ The following things are limited to with no fixes yet:
 
 - Keyword 'cons' must be in the sequences. Without it, the entries will be ignored.
 - Unable to verify from filtered sequences if they are fixed on the main database as the git repository of data dump frequently takes larger time in a day to update.
+- Offset findings are unstable and rigid based on NIST's offset while OEIS sequences might be different.
+- Even with Fable 5 being used, the project remains a failure at large. Fable 5's suggested architecture was weaker than how I decided the architecture. 
 
 ### AI Usage
 Use of AI was ONLY done to `src/ext/run.cpp` with descriptions of its functions given to Claude Fable 5. Other files had minor AI assistance of pointing me to correct
 sources with my own design decisions. This waiver only allows `src/ext/run.cpp` to be used without `LICENSE` conditions, other work is still within scope of GPL.
+
+This work is archived and might be erroneous due to AI generation in the main extension.
 ### References
 
 - https://github.com/oeis/oeisdata
